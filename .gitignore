@@ -1,0 +1,3 @@
+# per-NAS settings, created by setup.sh
+.env
+__pycache__/

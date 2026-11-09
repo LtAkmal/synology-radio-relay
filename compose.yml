@@ -1,0 +1,24 @@
+services:
+  radio-relay:
+    build: .
+    image: radio-relay:latest
+    container_name: radio-relay
+    network_mode: host
+    restart: unless-stopped
+    # Code is read from this folder (read-only) and the relay restarts itself when
+    # radio_relay.py changes, so updates don't need a rebuild.
+    volumes:
+      - ./:/app/src:ro
+    command: ["python3", "-I", "/app/src/radio_relay.py"]
+    environment:
+      # Values come from .env (see .env.example). Empty = auto-detect.
+      NAS_IP: "${NAS_IP:-}"
+      RELAY_PORT: "${RELAY_PORT:-18570}"
+      RELAY_DNS: "${RELAY_DNS:-}"
+      RELAY_MAX_ACTIVE: "${RELAY_MAX_ACTIVE:-3}"
+      RELAY_MP3_BITRATE: "${RELAY_MP3_BITRATE:-192k}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
