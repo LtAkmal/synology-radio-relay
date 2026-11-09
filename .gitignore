@@ -1,3 +1,5 @@
 # per-NAS settings, created by setup.sh
 .env
 __pycache__/
+# stations this NAS serves on /web/<name> (copy web_stations.example.json)
+web_stations.json

@@ -153,6 +153,27 @@ Stations you add later go straight to the station again and will be silent. Eith
 
 SHOUTcast directory stations always go through the relay automatically.
 
+## Bonus: play a station on a website (`/web/<name>`)
+
+Many SHOUTcast stations answer `ICY 200 OK` over plain http, which browsers refuse to play,
+especially on an https site. The relay can serve them as a normal MP3 stream for an `<audio>` element.
+
+1. Copy `web_stations.example.json` to `web_stations.json` and list the stations by name:
+   ```json
+   { "mtr": "http://27.147.28.109:8000" }
+   ```
+   Only these stations are served, so the relay is not an open proxy. The file is read on every request.
+2. Point your web server at it (nginx example):
+   ```nginx
+   location = /radio/mtr      { proxy_pass http://127.0.0.1:18570/web/mtr; proxy_buffering off; proxy_set_header Range ""; }
+   location = /radio/mtr.json { proxy_pass http://127.0.0.1:18570/web/mtr.json; }
+   ```
+3. On the page: `new Audio('/radio/mtr').play()`. `/radio/mtr.json` returns `{"name", "title", "listeners"}` for the current song.
+
+All listeners of one station share a single upstream connection (closed 20 s after the last one leaves).
+No padding, no ICY metadata in the output, and web listeners do not count toward `RELAY_MAX_ACTIVE`,
+so website visitors never stop Audio Station playback.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

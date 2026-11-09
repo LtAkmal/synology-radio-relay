@@ -19,10 +19,13 @@ Fix: Audio Station talks to this relay instead of the station.
 Endpoints
   /s?u=<url-encoded station URL>        relay one station
   /sbin/tunein-station.pls?id=N         stand-in for yp.shoutcast.com (also .m3u)
+  /web/<name>                           station from web_stations.json for a browser <audio> (no padding)
+  /web/<name>.json                      now playing for that station
   /health                               "ok" + active streams
 """
 import http.client
 import os
+import queue
 import socket
 import ssl
 import subprocess
@@ -79,8 +82,8 @@ YP_HOST = 'yp.shoutcast.com'
 YP_IP = os.environ.get('RELAY_YP_IP', '')
 # No "Mozilla" here: Shoutcast DNAS servers answer browser-like agents on "/" with
 # their HTML status page instead of audio (measured: 90.7 Magic FM, WUSB, J-Pop Sakura).
-UA = 'radio-relay/1.9 (Synology Audio Station fix)'
-VERSION = '1.9'
+UA = 'radio-relay/1.10 (Synology Audio Station fix)'
+VERSION = '1.10'
 CHUNK = 8192
 MP3_TYPES = ('audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg')
 _ctx = ssl.create_default_context()
@@ -372,6 +375,157 @@ def unregister(act):
             _active.remove(act)
 
 
+# ---------------------------------------------------------------- web broadcast
+# /web/<name> plays a station in a normal browser <audio> element (e.g. a website's
+# background music behind an HTTPS reverse proxy). Only stations listed in
+# web_stations.json ({"name": "http://station-url"}) are served, so this is not an
+# open proxy. One upstream connection per station is shared by every listener, no
+# padding, no ICY metadata in the output, and it does not count toward MAX_ACTIVE.
+
+WEB_STATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web_stations.json')
+WEB_BURST = 96 * 1024      # recent audio a new listener gets at once, so playback starts fast
+WEB_LINGER = 20            # seconds the upstream stays open after the last listener leaves
+_web = {}
+_web_lock = threading.Lock()
+
+
+def web_stations():
+    import json
+    try:
+        with open(WEB_STATIONS_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return {k: v for k, v in d.items() if isinstance(v, str) and v.startswith(('http://', 'https://'))}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+class Broadcast:
+    def __init__(self, name, url):
+        self.name, self.url = name, url
+        self.lock = threading.Lock()
+        self.listeners = set()
+        self.burst, self.burst_len = collections.deque(), 0
+        self.title, self.icy_name = '', ''
+        self.ready, self.error, self.dead = threading.Event(), None, False
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def set_title(self, meta):
+        t = meta.decode('utf-8', 'replace')
+        i = t.find("StreamTitle='")
+        if i >= 0:
+            t = t[i + 13:]
+            j = t.find("';")
+            self.title = (t[:j] if j >= 0 else t).strip()
+
+    def add(self):
+        q = queue.Queue(maxsize=512)
+        with self.lock:
+            if self.dead:
+                return None
+            for b in self.burst:
+                q.put_nowait(b)
+            self.listeners.add(q)
+        return q
+
+    def remove(self, q):
+        with self.lock:
+            self.listeners.discard(q)
+
+    @staticmethod
+    def _end(q):
+        with q.mutex:
+            q.queue.clear()
+        q.put_nowait(None)
+
+    def push(self, b):
+        with self.lock:
+            self.burst.append(b)
+            self.burst_len += len(b)
+            while self.burst_len - len(self.burst[0]) >= WEB_BURST:
+                self.burst_len -= len(self.burst.popleft())
+            for q in list(self.listeners):
+                try:
+                    q.put_nowait(b)
+                except queue.Full:          # listener too slow: drop it, the browser reconnects
+                    self.listeners.discard(q)
+                    self._end(q)
+            return len(self.listeners)
+
+    def run(self):
+        conn = ff = None
+        t0, why = time.time(), 'eof'
+        try:
+            conn, resp = open_upstream(self.url, True)
+            ctype = (resp.getheader('Content-Type') or 'audio/mpeg').split(';')[0].strip().lower()
+            self.icy_name = resp.getheader('icy-name') or self.name
+            src = upstream_audio(resp, int(resp.getheader('icy-metaint') or 0), self.set_title)
+            if ctype not in MP3_TYPES:
+                ff = subprocess.Popen([FFMPEG, '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
+                                       '-vn', '-c:a', 'libmp3lame', '-b:a', MP3_BITRATE, '-f', 'mp3', 'pipe:1'],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+                def feed(src=src):
+                    try:
+                        for b in src:
+                            ff.stdin.write(b)
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            ff.stdin.close()
+                        except Exception:
+                            pass
+                threading.Thread(target=feed, daemon=True).start()
+                src = iter(lambda: ff.stdout.read1(CHUNK), b'')
+            self.ready.set()
+            log('web start', self.name, ctype, self.url[:70])
+            idle_since = None
+            for b in src:
+                if self.push(b):
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = time.time()
+                elif time.time() - idle_since > WEB_LINGER:
+                    why = 'idle'
+                    break
+        except Exception as e:
+            self.error, why = e, '%s: %s' % (type(e).__name__, e)
+        finally:
+            with self.lock:
+                self.dead = True
+                for q in self.listeners:
+                    self._end(q)
+                self.listeners.clear()
+            with _web_lock:
+                if _web.get(self.name) is self:
+                    del _web[self.name]
+            for c in (conn and conn.close, ff and ff.kill):
+                try:
+                    c and c()
+                except Exception:
+                    pass
+            self.ready.set()
+            log('web stop', self.name, 'secs', round(time.time() - t0, 1), why)
+
+
+def web_broadcast(name):
+    url = web_stations().get(name)
+    if not url:
+        return None
+    for _ in range(3):
+        with _web_lock:
+            bc = _web.get(name)
+            if bc is None or bc.url != url:
+                bc = _web[name] = Broadcast(name, url)
+        bc.ready.wait(20)
+        if bc.error:
+            raise IOError('station unavailable: %s' % bc.error)
+        q = bc.add()
+        if q is not None:
+            return bc, q
+    raise IOError('station keeps stopping')
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
@@ -399,6 +553,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, 'text/plain', body.encode())
             if p.path.startswith('/sbin/tunein-station'):
                 return self._playlist(p)
+            if p.path.startswith('/web/'):
+                return self._web(p.path[5:])
             if p.path == '/s' and qs.get('u'):
                 return self._stream(qs['u'][0], (qs.get('m') or [PAD_MODE])[0], int((qs.get('mi') or [META_INT])[0]))
             return self._send(404, 'text/plain', b'not found\n')
@@ -417,6 +573,40 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _web(self, name):
+        if name.endswith('.json'):              # now playing: {"name", "title", "listeners"}
+            import json
+            name = name[:-5]
+            if name not in web_stations():
+                return self._send(404, 'text/plain', b'not found\n')
+            with _web_lock:
+                bc = _web.get(name)
+            info = {'name': bc.icy_name if bc else name, 'title': bc.title if bc else '',
+                    'listeners': len(bc.listeners) if bc else 0}
+            return self._send(200, 'application/json', json.dumps(info).encode())
+        got = web_broadcast(name)
+        if not got:
+            return self._send(404, 'text/plain', b'not found\n')
+        bc, q = got
+        t0, sent = time.time(), 0
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            while True:
+                try:
+                    b = q.get(timeout=30)
+                except queue.Empty:
+                    break
+                if b is None:
+                    break
+                self.wfile.write(b)
+                sent += len(b)
+        finally:
+            bc.remove(q)
+            log('web listener', name, 'out_bytes', sent, 'secs', round(time.time() - t0, 1))
 
     def _playlist(self, p):
         conn, resp = open_upstream('http://%s%s?%s' % (YP_HOST, p.path, p.query), False)

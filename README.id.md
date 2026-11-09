@@ -153,6 +153,27 @@ Station yang ditambahkan belakangan akan langsung ke station lagi, jadi bisu lag
 
 Station dari direktori SHOUTcast selalu otomatis lewat relay.
 
+## Bonus: putar station di website (`/web/<nama>`)
+
+Banyak station SHOUTcast membalas `ICY 200 OK` lewat http biasa, dan browser menolak memutarnya,
+apalagi di situs https. Relay bisa menyajikannya sebagai stream MP3 biasa untuk elemen `<audio>`.
+
+1. Salin `web_stations.example.json` jadi `web_stations.json` lalu isi station per nama:
+   ```json
+   { "mtr": "http://27.147.28.109:8000" }
+   ```
+   Hanya station di file ini yang dilayani, jadi relay bukan open proxy. File dibaca di setiap request.
+2. Arahkan web server ke relay (contoh nginx):
+   ```nginx
+   location = /radio/mtr      { proxy_pass http://127.0.0.1:18570/web/mtr; proxy_buffering off; proxy_set_header Range ""; }
+   location = /radio/mtr.json { proxy_pass http://127.0.0.1:18570/web/mtr.json; }
+   ```
+3. Di halaman: `new Audio('/radio/mtr').play()`. `/radio/mtr.json` mengembalikan `{"name", "title", "listeners"}` untuk lagu yang sedang diputar.
+
+Semua pendengar satu station berbagi satu koneksi ke station (ditutup 20 detik setelah pendengar terakhir pergi).
+Tanpa padding, tanpa metadata ICY di output, dan pendengar web tidak dihitung ke `RELAY_MAX_ACTIVE`,
+jadi pengunjung website tidak pernah menghentikan Audio Station.
+
 ## Troubleshooting
 
 | Gejala | Penyebab / solusi |
