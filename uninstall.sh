@@ -24,10 +24,17 @@ for u in $UUIDS; do
 done
 [ -n "$UUIDS" ] || echo "no rule found (or delete it by hand: Control Panel > Login Portal > Advanced > Reverse Proxy)"
 
+echo "== DSM boot task"
+if /usr/syno/bin/synowebapi --exec api=SYNO.Core.EventScheduler method=get version=1 task_name='"radio-relay hosts"' 2>/dev/null | grep -q '"success" *: *true'; then
+  /usr/syno/bin/synowebapi --exec api=SYNO.Core.EventScheduler method=delete version=1 task_name='"radio-relay hosts"' >/dev/null && echo 'deleted task "radio-relay hosts"'
+else
+  echo "no boot task found"
+fi
+
 echo "== radio station URLs"
 for f in userdef.json favorite.json; do
   if [ -f /usr/syno/etc/radio/$f.bak-radio-relay ]; then
     cp -p /usr/syno/etc/radio/$f.bak-radio-relay /usr/syno/etc/radio/$f && echo "restored $f from backup"
   fi
 done
-echo "radio-relay removed. Remember to delete the DSM boot-up task if you created one."
+echo "radio-relay removed."

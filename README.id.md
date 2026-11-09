@@ -107,17 +107,20 @@ Masuk SSH ke NAS dengan user admin, lalu:
 sudo sh /volume1/docker/radio-relay/setup.sh
 ```
 
-Installer melakukan empat hal, dan setiap langkah ditampilkan saat berjalan:
+Installer melakukan lima hal, dan setiap langkah ditampilkan saat berjalan:
 1. membangun dan menyalakan container `radio-relay` (otomatis hidup lagi setelah reboot)
 2. menambahkan `<NAS_IP> yp.shoutcast.com  # radio-relay` ke `/etc/hosts` (backup: `/etc/hosts.bak-radio-relay`)
 3. membuat aturan Reverse Proxy DSM `yp.shoutcast.com:80 → 127.0.0.1:18570` (terlihat di Control Panel → Login Portal → Advanced → Reverse Proxy)
 4. mengarahkan station User-defined dan Favorit yang sudah ada ke relay (backup: `/usr/syno/etc/radio/*.bak-radio-relay`)
+5. membuat task boot DSM **`radio-relay hosts`** yang menjalankan `setup.sh --boot` sebagai root (lihat langkah 4)
 
 Baris terakhir seharusnya `OK`. `setup.sh` boleh dijalankan ulang kapan saja; ia hanya memperbaiki bagian yang kurang.
 
-### 4. Supaya baris hosts tetap ada setelah reboot / update DSM (disarankan)
+### 4. Supaya baris hosts tetap ada setelah reboot / update DSM (otomatis)
 
-DSM bisa saja menulis ulang `/etc/hosts`. Buat task saat boot supaya baris itu selalu dipasang lagi:
+DSM bisa saja menulis ulang `/etc/hosts`, misalnya setelah update. Karena itu `setup.sh` membuat task boot **`radio-relay hosts`** yang memasang lagi baris itu setiap NAS menyala. Task-nya terlihat di Control Panel → **Task Scheduler** (Owner `root`, Event `Boot-up`). Kalau folder ini dipindah, jalankan lagi `setup.sh`, dan task-nya ikut diperbarui ke lokasi baru.
+
+Kalau installer bilang task tidak bisa dibuat, tambahkan manual:
 
 1. Control Panel → **Task Scheduler** → Create → **Triggered Task** → **User-defined script**
 2. General: nama `radio-relay hosts`, User **root**, Event **Boot-up**
@@ -173,7 +176,7 @@ Container membaca `radio_relay.py` langsung dari folder ini dan **restart sendir
 sudo sh /volume1/docker/radio-relay/uninstall.sh
 ```
 
-Ini menghapus container, baris `/etc/hosts` dan aturan Reverse Proxy, lalu mengembalikan station User-defined/Favorit dari backup. Task boot (langkah 4) dihapus manual kalau kamu membuatnya.
+Ini menghapus container, baris `/etc/hosts`, aturan Reverse Proxy, dan task boot `radio-relay hosts`, lalu mengembalikan station User-defined/Favorit dari backup.
 
 ## Catatan teknis
 

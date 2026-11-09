@@ -107,17 +107,20 @@ SSH into the NAS as your admin user, then:
 sudo sh /volume1/docker/radio-relay/setup.sh
 ```
 
-It does four things, each one printed as it runs:
+It does five things, each one printed as it runs:
 1. builds and starts the `radio-relay` container (it restarts by itself after a reboot)
 2. adds `<NAS_IP> yp.shoutcast.com  # radio-relay` to `/etc/hosts` (backup: `/etc/hosts.bak-radio-relay`)
 3. creates a DSM Reverse Proxy rule `yp.shoutcast.com:80 → 127.0.0.1:18570` (visible in Control Panel → Login Portal → Advanced → Reverse Proxy)
 4. points your existing User-defined and Favourite stations at the relay (backup: `/usr/syno/etc/radio/*.bak-radio-relay`)
+5. creates a DSM boot-up task **`radio-relay hosts`** that runs `setup.sh --boot` as root (see step 4)
 
 The last line should read `OK`. You can run `setup.sh` again at any time; it only fixes what is missing.
 
-### 4. Keep the hosts line after reboots / DSM updates (recommended)
+### 4. Keep the hosts line after reboots / DSM updates (automatic)
 
-DSM may rewrite `/etc/hosts`. Create a boot task so the line is always re-added:
+DSM may rewrite `/etc/hosts`, for example after an update. That is why `setup.sh` creates a boot-up task, **`radio-relay hosts`**, that re-adds the line every time the NAS starts. You can see it in Control Panel → **Task Scheduler** (Owner `root`, Event `Boot-up`). If you move this folder, run `setup.sh` again and the task is updated to the new path.
+
+If the installer says it could not create the task, add it by hand:
 
 1. Control Panel → **Task Scheduler** → Create → **Triggered Task** → **User-defined script**
 2. General: name `radio-relay hosts`, User **root**, Event **Boot-up**
@@ -173,7 +176,7 @@ The container reads `radio_relay.py` directly from this folder and **restarts it
 sudo sh /volume1/docker/radio-relay/uninstall.sh
 ```
 
-This removes the container, the `/etc/hosts` line and the Reverse Proxy rule, and restores your User-defined/Favourite stations from the backup. Delete the boot task (step 4) by hand if you created it.
+This removes the container, the `/etc/hosts` line, the Reverse Proxy rule and the `radio-relay hosts` boot task, and restores your User-defined/Favourite stations from the backup.
 
 ## Technical notes
 

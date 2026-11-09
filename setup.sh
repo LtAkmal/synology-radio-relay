@@ -12,6 +12,7 @@
 #     (Control Panel > Login Portal > Advanced > Reverse Proxy)
 #  4. your User-defined + Favourite radio URLs are pointed at the relay
 #     (the original URL stays inside ?u=...; backup: /usr/syno/etc/radio/*.bak-radio-relay)
+#  5. DSM Task Scheduler boot-up task "radio-relay hosts" (root): sh <this folder>/setup.sh --boot
 set -e
 DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$DIR"
@@ -64,7 +65,7 @@ if [ "$1" = "--boot" ]; then
   exit 0
 fi
 
-echo "== 1/4 building and starting the radio-relay container"
+echo "== 1/5 building and starting the radio-relay container"
 command -v docker >/dev/null || { echo "docker not found - install Container Manager from Package Center first"; exit 1; }
 docker compose -f compose.yml up -d --build
 i=0
@@ -74,10 +75,10 @@ until curl -fsS -m 2 "http://127.0.0.1:${RELAY_PORT}/health" >/dev/null 2>&1; do
 done
 curl -fsS "http://127.0.0.1:${RELAY_PORT}/health" | head -2
 
-echo "== 2/4 /etc/hosts"
+echo "== 2/5 /etc/hosts"
 ensure_hosts
 
-echo "== 3/4 DSM reverse proxy: yp.shoutcast.com:80 -> 127.0.0.1:${RELAY_PORT}"
+echo "== 3/5 DSM reverse proxy: yp.shoutcast.com:80 -> 127.0.0.1:${RELAY_PORT}"
 if /usr/syno/bin/synowebapi --exec api=SYNO.Core.AppPortal.ReverseProxy method=list version=1 2>/dev/null | grep -q '"yp.shoutcast.com"'; then
   echo "rule already exists"
 else
@@ -86,7 +87,7 @@ else
   sleep 2
 fi
 
-echo "== 4/4 pointing User-defined + Favourite radio at the relay"
+echo "== 4/5 pointing User-defined + Favourite radio at the relay"
 python3 -I - "$RELAY" <<'EOF'
 import json, os, shutil, sys, urllib.parse
 relay = sys.argv[1]
@@ -110,6 +111,36 @@ for name in ('userdef.json', 'favorite.json'):
         json.dump(d, open(p, 'w'), indent=3, ensure_ascii=False)
         os.chown(p, st_.st_uid, st_.st_gid)
     print(name, 'stations pointed at relay:', changed)
+EOF
+
+echo "== 5/5 DSM boot task \"radio-relay hosts\" (re-adds the /etc/hosts line after reboots / DSM updates)"
+python3 -I - "$DIR/setup.sh" <<'EOF'
+import json, subprocess, sys
+cmd = 'sh %s --boot' % sys.argv[1]
+j = json.dumps
+
+def api(**kw):
+    args = ['/usr/syno/bin/synowebapi', '--exec'] + ['%s=%s' % kv for kv in kw.items()]
+    out = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True).stdout
+    start = out.rfind('\n{')   # synowebapi echoes the request first, then prints the JSON reply
+    try:
+        return json.loads(out[start + 1:] if start >= 0 else out[out.index('{'):])
+    except ValueError:
+        return {'success': False}
+
+name = 'radio-relay hosts'
+cur = api(api='SYNO.Core.EventScheduler', method='get', version='1', task_name=j(name))
+if cur.get('success') and cur.get('data', {}).get('operation') == cmd:
+    print('task already exists')
+else:
+    if cur.get('success'):
+        api(api='SYNO.Core.EventScheduler', method='delete', version='1', task_name=j(name))
+    r = api(api='SYNO.Core.EventScheduler.Root', method='create', version='1',
+            task_name=j(name), owner=j({'0': 'root'}), event=j('bootup'), enable='true',
+            depend_on_task=j(''), notify_enable='false', notify_mail=j(''), notify_if_error='false',
+            operation_type=j('script'), operation=j(cmd))
+    print('created boot-up task: ' + cmd if r.get('success') else
+          'could not create it - add it by hand (README, "Keep the hosts line after reboots")')
 EOF
 
 echo "== check: a SHOUTcast playlist now goes through the relay"
