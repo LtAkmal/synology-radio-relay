@@ -179,7 +179,8 @@ jadi pengunjung website tidak pernah menghentikan Audio Station.
 | Gejala | Penyebab / solusi |
 |---|---|
 | Station tertulis **"(0 kbps)"** dan tidak pernah bunyi | Station sudah mati di sumbernya (biasanya bekas Radionomy). Pilih station lain. |
-| Satu station gagal, yang lain jalan | Station sedang offline. `curl http://127.0.0.1:18570/log` akan menunjukkan misalnya `Connection refused` atau `Host is unreachable`. |
+| Satu station gagal, yang lain jalan | Station sedang offline. `curl http://127.0.0.1:18570/log` akan menunjukkan misalnya `Connection refused` atau `Host is unreachable`. Stream di `listen.shoutcast.com` / `listen.radionomy.com` pasti mati karena server itu sudah tidak menjawab. |
+| Satu genre isinya station mati semua | Daftar genre bawaan Audio Station sudah bertahun-tahun umurnya. Audio Station mengunduh daftar baru dari SHOUTcast saat genre itu dibuka, jadi buka (atau refresh) genre itu sekali. |
 | Semua station SHOUTcast gagal, User-defined jalan | Pastikan `/etc/hosts` berisi `<NAS_IP> yp.shoutcast.com` dengan **IP LAN, bukan 127.0.0.1**, dan aturan Reverse Proxy-nya ada. Jalankan ulang `setup.sh`. |
 | Tidak ada yang jalan, `/health` tidak menjawab | Container tidak jalan: `sudo docker logs radio-relay`, lalu `sudo sh setup.sh`. |
 | Firewall DSM aktif dan radio berhenti jalan | Izinkan TCP port `18570` dari IP LAN NAS sendiri / jaringan LAN. |
@@ -207,6 +208,9 @@ Ini menghapus container, baris `/etc/hosts`, aturan Reverse Proxy, dan task boot
 - **User-Agent**: relay memperkenalkan diri tanpa kata "Mozilla", karena banyak server SHOUTcast membalas klien mirip browser di `/` dengan halaman status HTML, bukan audio.
 - **Loopback**: Audio Station menolak URL playlist yang resolve ke `127.0.0.1` (error 101). Itu sebabnya `/etc/hosts` harus memakai IP LAN.
 - **Stream sisa**: Audio Station kadang tetap membaca station setelah player berhenti. Relay menutup stream terlama kalau jumlahnya melebihi `RELAY_MAX_ACTIVE`.
+- **Mirror**: Audio Station cuma memutar server pertama di playlist station. Relay menitipkan server-server lain station itu ke entri tersebut dan pindah ke server berikutnya kalau yang pertama mati.
+- **Header station yang panjang**: station dengan `icy-genre` sekitar 230 karakter membuat `proxy.cgi` memutus stream, jadi relay memendekkan nilai `icy-*` menjadi 120 karakter.
+- **Keanehan station** (1.11, dari scan semua 1.261 station direktori SHOUTcast): relay mengulang lookup DNS yang gagal sementara, tetap memutar station yang sertifikat HTTPS-nya kedaluwarsa, menganggap `http://host:443/...` sebagai HTTPS, dan meng-encode spasi di path stream.
 - Relay tidak mengubah apa pun di dalam Audio Station, dan update Audio Station tidak menghapusnya.
 
 ## Disclaimer

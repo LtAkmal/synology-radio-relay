@@ -179,7 +179,8 @@ so website visitors never stop Audio Station playback.
 | Symptom | Cause / fix |
 |---|---|
 | Station shows **"(0 kbps)"** and never plays | The station is dead at its source (usually old Radionomy). Pick another one. |
-| A single station fails, others work | Station offline. `curl http://127.0.0.1:18570/log` shows e.g. `Connection refused` or `Host is unreachable`. |
+| A single station fails, others work | Station offline. `curl http://127.0.0.1:18570/log` shows e.g. `Connection refused` or `Host is unreachable`. Streams on `listen.shoutcast.com` / `listen.radionomy.com` are always dead: that server no longer answers. |
+| A whole genre is full of dead stations | The genre lists that ship with Audio Station are years old. Audio Station downloads a fresh list from SHOUTcast when you open the genre, so open it (or refresh it) once. |
 | All SHOUTcast stations fail, User-defined work | Check `/etc/hosts` contains `<NAS_IP> yp.shoutcast.com` with the **LAN IP, not 127.0.0.1**, and that the Reverse Proxy rule exists. Run `setup.sh` again. |
 | Nothing works, `/health` does not answer | Container not running: `sudo docker logs radio-relay`, then `sudo sh setup.sh`. |
 | DSM Firewall enabled and it stopped working | Allow TCP port `18570` from the NAS's own LAN IP / your LAN. |
@@ -207,6 +208,9 @@ This removes the container, the `/etc/hosts` line, the Reverse Proxy rule and th
 - **User-Agent**: the relay identifies itself without "Mozilla", because many SHOUTcast servers answer browser-like clients on `/` with an HTML status page instead of audio.
 - **Loopback**: Audio Station refuses playlist URLs that resolve to `127.0.0.1` (error 101), which is why `/etc/hosts` must use the LAN IP.
 - **Leftover streams**: Audio Station sometimes keeps reading a station after the player stopped. The relay closes the oldest stream when more than `RELAY_MAX_ACTIVE` are open.
+- **Mirrors**: Audio Station only plays the first server in a station's playlist. The relay gives that entry the station's other servers too and moves on to the next one when the first is down.
+- **Long station headers**: a station whose `icy-genre` is ~230 characters long makes `proxy.cgi` drop the stream, so the relay shortens `icy-*` values to 120 characters.
+- **Station quirks** (1.11, from a scan of all 1,261 SHOUTcast directory stations): the relay retries a DNS lookup that fails temporarily, still plays stations whose HTTPS certificate has expired, treats `http://host:443/...` as HTTPS, and encodes spaces in stream paths.
 - The relay changes nothing inside Audio Station itself, and Audio Station updates do not remove it.
 
 ## Disclaimer

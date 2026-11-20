@@ -17,7 +17,7 @@ Fix: Audio Station talks to this relay instead of the station.
     oldest, which also ends orphaned proxy.cgi processes Audio Station leaves.
 
 Endpoints
-  /s?u=<url-encoded station URL>        relay one station
+  /s?u=<url-encoded station URL>        relay one station (more u= = fallback mirrors)
   /sbin/tunein-station.pls?id=N         stand-in for yp.shoutcast.com (also .m3u)
   /web/<name>                           station from web_stations.json for a browser <audio> (no padding)
   /web/<name>.json                      now playing for that station
@@ -76,17 +76,23 @@ PAD_MODE = os.environ.get('RELAY_PAD_MODE', 'id3multi')
 META_PAD_BLOCKS = (PAD_BYTES // 4081) + 1
 META_INT = int(os.environ.get('RELAY_META_INT', '64'))
 MAX_ACTIVE = int(os.environ.get('RELAY_MAX_ACTIVE', '3'))
+MAX_MIRRORS = 4            # servers tried per station: the playlist entry plus the next ones
 MP3_BITRATE = os.environ.get('RELAY_MP3_BITRATE', '192k')
 FFMPEG = os.environ.get('RELAY_FFMPEG', 'ffmpeg')
 YP_HOST = 'yp.shoutcast.com'
 YP_IP = os.environ.get('RELAY_YP_IP', '')
 # No "Mozilla" here: Shoutcast DNAS servers answer browser-like agents on "/" with
 # their HTML status page instead of audio (measured: 90.7 Magic FM, WUSB, J-Pop Sakura).
-UA = 'radio-relay/1.10 (Synology Audio Station fix)'
-VERSION = '1.10'
+UA = 'radio-relay/1.11 (Synology Audio Station fix)'
+VERSION = '1.11'
 CHUNK = 8192
 MP3_TYPES = ('audio/mpeg', 'audio/mp3', 'audio/mpeg3', 'audio/x-mpeg')
 _ctx = ssl.create_default_context()
+# Fallback for stations whose certificate expired or is self-signed: it is only a
+# public audio stream, and refusing it just leaves the station silent.
+_ctx_lax = ssl.create_default_context()
+_ctx_lax.check_hostname = False
+_ctx_lax.verify_mode = ssl.CERT_NONE
 
 
 import collections
@@ -226,19 +232,14 @@ class _IcyFix:
         return getattr(self.f, n)
 
 
-def open_upstream(url, want_meta, hops=8):
-    for _ in range(hops):
-        p = urllib.parse.urlsplit(url)
-        host = p.hostname
-        port = p.port or (443 if p.scheme == 'https' else 80)
-        target = yp_ip() if host == YP_HOST else host
-        if p.scheme == 'https':
-            conn = http.client.HTTPSConnection(target, port, timeout=20, context=_ctx)
-        else:
-            conn = http.client.HTTPConnection(target, port, timeout=20)
-        path = (p.path or '/') + ('?' + p.query if p.query else '')
+def _request(target, port, tls, ctx, host_hdr, path, want_meta):
+    if tls:
+        conn = http.client.HTTPSConnection(target, port, timeout=20, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(target, port, timeout=20)
+    try:
         conn.putrequest('GET', path, skip_host=True, skip_accept_encoding=True)
-        conn.putheader('Host', host if not p.port else '%s:%d' % (host, p.port))
+        conn.putheader('Host', host_hdr)
         conn.putheader('User-Agent', UA)
         conn.putheader('Accept', '*/*')
         if want_meta:
@@ -247,6 +248,40 @@ def open_upstream(url, want_meta, hops=8):
         resp = conn.response_class(conn.sock, method='GET')
         resp.fp = _IcyFix(resp.fp)
         resp.begin()
+    except BaseException:
+        conn.close()
+        raise
+    return conn, resp
+
+
+def open_upstream(url, want_meta, hops=8):
+    for _ in range(hops):
+        p = urllib.parse.urlsplit(url)
+        host = p.hostname
+        # Directory entries like http://host:443/... are TLS servers.
+        tls = p.scheme == 'https' or p.port == 443
+        port = p.port or (443 if tls else 80)
+        target = yp_ip() if host == YP_HOST else host
+        # Some directory entries have spaces in the path ("/APS Radio Blues").
+        path = urllib.parse.quote(p.path or '/', safe="/%:@!$&'()*+,;=~") + ('?' + p.query if p.query else '')
+        host_hdr = host if not p.port else '%s:%d' % (host, p.port)
+        ctx, dns_tries = _ctx, 0
+        while True:
+            try:
+                conn, resp = _request(target, port, tls, ctx, host_hdr, path, want_meta)
+                break
+            except socket.gaierror as e:
+                # "Temporary failure in name resolution": the LAN resolver drops some
+                # lookups under load (measured 2026-11-21); a second try succeeds.
+                dns_tries += 1
+                if e.errno != socket.EAI_AGAIN or dns_tries > 2:
+                    raise
+                time.sleep(1)
+            except ssl.SSLCertVerificationError:
+                if ctx is _ctx_lax:
+                    raise
+                log('certificate not valid, connecting anyway:', host)
+                ctx = _ctx_lax
         if resp.status in (301, 302, 303, 307, 308):
             loc = resp.getheader('Location')
             conn.close()
@@ -556,7 +591,7 @@ class Handler(BaseHTTPRequestHandler):
             if p.path.startswith('/web/'):
                 return self._web(p.path[5:])
             if p.path == '/s' and qs.get('u'):
-                return self._stream(qs['u'][0], (qs.get('m') or [PAD_MODE])[0], int((qs.get('mi') or [META_INT])[0]))
+                return self._stream(qs['u'], (qs.get('m') or [PAD_MODE])[0], int((qs.get('mi') or [META_INT])[0]))
             return self._send(404, 'text/plain', b'not found\n')
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -614,21 +649,29 @@ class Handler(BaseHTTPRequestHandler):
             text = resp.read(65536).decode('latin1', 'replace')
         finally:
             conn.close()
-        out = []
+        out, entries = [], []
         for line in text.splitlines():
             s = line.strip()
             if s.lower().startswith('file') and '=' in s:
                 k, v = s.split('=', 1)
-                out.append('%s=%s/s?u=%s' % (k, PUBLIC_BASE, urllib.parse.quote(v.strip(), safe='')))
+                entries.append((len(out), k + '=', v.strip()))
+                out.append(None)
             elif s.startswith(('http://', 'https://')):
-                out.append('%s/s?u=%s' % (PUBLIC_BASE, urllib.parse.quote(s, safe='')))
+                entries.append((len(out), '', s))
+                out.append(None)
             else:
                 out.append(line)
+        # Audio Station only plays the first entry, so every entry also carries the
+        # station's other mirrors; /s falls back to them when its own server is down.
+        urls = [e[2] for e in entries]
+        for n, (i, prefix, _) in enumerate(entries):
+            mirrors = (urls[n:] + urls[:n])[:MAX_MIRRORS]
+            out[i] = '%s%s/s?%s' % (prefix, PUBLIC_BASE, urllib.parse.urlencode([('u', u) for u in mirrors]))
         ctype = 'audio/x-scpls' if p.path.endswith('.pls') else 'audio/x-mpegurl'
         self._send(200, ctype, ('\n'.join(out) + '\n').encode('latin1', 'replace'))
         log('playlist', p.query)
 
-    def _stream(self, url, mode='id3multi', meta_int=64):
+    def _stream(self, urls, mode='id3multi', meta_int=64):
         ua = self.headers.get('User-Agent', '')
         icy = self.headers.get('Icy-MetaData') == '1'
         playback = icy or ua.startswith('AudioStation/5')
@@ -641,7 +684,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(SILENCE)
             return
-        conn, resp = open_upstream(url, True)
+        for url in urls[:MAX_MIRRORS]:
+            try:
+                conn, resp = open_upstream(url, True)
+                break
+            except Exception as e:
+                err = e
+                if len(urls) > 1:
+                    log('mirror failed:', url[:70], type(e).__name__, e)
+        else:
+            raise err
         ctype = (resp.getheader('Content-Type') or 'audio/mpeg').split(';')[0].strip().lower()
         metaint = int(resp.getheader('icy-metaint') or 0)
         transcode = ctype not in MP3_TYPES
@@ -657,7 +709,9 @@ class Handler(BaseHTTPRequestHandler):
             for h in ('icy-name', 'icy-genre', 'icy-url', 'icy-description'):
                 v = resp.getheader(h)
                 if v:
-                    self.send_header(h, v)
+                    # Long values (a 230-char icy-genre, measured 2026-11-21) make
+                    # proxy.cgi drop the stream; the player only shows a few words anyway.
+                    self.send_header(h, v[:120])
             if not transcode and resp.getheader('icy-br'):
                 self.send_header('icy-br', resp.getheader('icy-br'))
             out_metaint = meta_int if mode in ('meta', 'title') else 16000
